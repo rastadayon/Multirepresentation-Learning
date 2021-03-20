@@ -107,7 +107,8 @@ class DatasetBase:
 
     @property
     def data_path(self):
-        pathstr = os.environ.get("DATA_PATH", os.getcwd())
+        # pathstr = os.environ.get("DATA_PATH", os.getcwd())
+        pathstr = "/content/stl10_binary/"
         os.makedirs(pathstr, exist_ok=True)
         return pathstr
 
