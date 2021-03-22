@@ -13,6 +13,7 @@ from torchvision.datasets import STL10
 from torchvision.datasets import ImageFolder
 
 import ws_resnet
+import botnet
 
 ###################
 # Transform utils #
@@ -309,6 +310,7 @@ class MLP(torch.nn.Module):
         self.net = torch.nn.Sequential(*layers)
 
     def forward(self, x):
+        # print(x.shape)
         return self.net(x)
 
 
@@ -319,9 +321,14 @@ def get_encoder(name: str, **kwargs) -> torch.nn.Module:
     :param kwargs: kwargs to send to the model
     :return:
     """
-
+    # print("------------------> ",**kwargs)
+    # assert False
+    # print(ws_resnet.__dict__.keys())
+    # assert False
     if name in ws_resnet.__dict__:
         model_creator = ws_resnet.__dict__.get(name)
+    elif name in botnet.__dict__:
+        model_creator = botnet.__dict__.get(name)
     elif name in torchvision.models.__dict__:
         model_creator = torchvision.models.__dict__.get(name)
     else:
@@ -333,6 +340,8 @@ def get_encoder(name: str, **kwargs) -> torch.nn.Module:
         model.fc = torch.nn.Identity()
     elif hasattr(model, "classifier"):
         model.classifier = torch.nn.Identity()
+    elif isinstance(model, botnet.BoTNet):
+        pass
     else:
         raise NotImplementedError(f"Unknown class {model.__class__}")
 

@@ -8,29 +8,42 @@ from moco import MoCoMethodParams
 
 def main():
     # base_config = MoCoMethodParams(
-    #     lr=0.8,
-    #     batch_size=256,
-    #     gather_keys_for_queue=False,
-    #     loss_type="ip",
-    #     use_negative_examples_from_queue=False,
-    #     use_both_augmentations_as_queries=True,
-    #     mlp_normalization="bn",
-    #     prediction_mlp_layers=2,
-    #     projection_mlp_layers=2,
-    #     m=0.996,
-    #     use_momentum_schedule=True,
+        # lr=0.8,
+        # batch_size=256,
+        # gather_keys_for_queue=False,
+        # loss_type="ip",
+        # use_negative_examples_from_queue=False,
+        # use_both_augmentations_as_queries=True,
+        # mlp_normalization="bn",
+        # prediction_mlp_layers=2,
+        # projection_mlp_layers=2,
+        # m=0.996,
+        # use_momentum_schedule=True,
     # )
-    two_resnet50s = MoCoMethodParams(
-    use_eqco_margin=True, 
-    eqco_alpha=65536, 
-    K=0,
-    use_negative_examples_from_batch=True,
-    use_negative_examples_from_queue=False,
-    max_epochs=200,
-    encoder_arch="resnet50",
-    embedding_dim=2048
+    # two_resnet50s = MoCoMethodParams(
+        # use_eqco_margin=True, 
+        # eqco_alpha=65536, 
+        # K=0,
+        # use_negative_examples_from_batch=True,
+        # use_negative_examples_from_queue=False,
+        # max_epochs=200,
+        # encoder_arch="resnet50",
+        # embedding_dim=2048
+    # )
+    two_botnets = MoCoMethodParams(
+        use_eqco_margin=True, 
+        eqco_alpha=65536, 
+        K=0,
+        use_negative_examples_from_batch=True,
+        use_negative_examples_from_queue=False,
+        max_epochs=200,
+        encoder_arch="BoTNet",
+        embedding_dim=2048,
+        fmap_size=24,
+        dim=256,
+        batch_size=128
     )
-    base_config = two_resnet50s
+    base_config = two_botnets
     configs = {
         "base": base_config,
         # "pred_only": evolve(base_config, mlp_normalization=None, prediction_mlp_normalization="bn"),
