@@ -20,16 +20,16 @@ def main():
         # m=0.996,
         # use_momentum_schedule=True,
     # )
-    # two_resnet50s = MoCoMethodParams(
-        # use_eqco_margin=True, 
-        # eqco_alpha=65536, 
-        # K=0,
-        # use_negative_examples_from_batch=True,
-        # use_negative_examples_from_queue=False,
-        # max_epochs=200,
-        # encoder_arch="resnet50",
-        # embedding_dim=2048
-    # )
+    two_resnet50s = MoCoMethodParams(
+        use_eqco_margin=True, 
+        eqco_alpha=65536, 
+        K=0,
+        use_negative_examples_from_batch=True,
+        use_negative_examples_from_queue=False,
+        max_epochs=200,
+        encoder_arch="ws_resnet50",
+        embedding_dim=2048
+    )
     two_botnets = MoCoMethodParams(
         use_eqco_margin=True, 
         eqco_alpha=65536, 
