@@ -145,55 +145,41 @@ class MoCoMethod(pl.LightningModule):
         self.dataset = utils.get_moco_dataset(hparams.dataset_name, transforms)
 
         # "key" function (no grad)
-        if len(self.model) == 1:
-            self.lagging_model = copy.deepcopy(self.model)
-            for param in self.lagging_model.parameters():
-                param.requires_grad = False
+        self.lagging_model = copy.deepcopy(self.model)
+        for param in self.lagging_model.parameters():
+            param.requires_grad = False
 
-        self.projection_model = [utils.MLP(
+        self.projection_model = utils.MLP(
             hparams.embedding_dim,
             hparams.dim,
             hparams.mlp_hidden_dim,
             num_layers=hparams.projection_mlp_layers,
             normalization=get_mlp_normalization(hparams),
             weight_standardization=hparams.use_mlp_weight_standardization,
-        ) for _ in self.model]
-        if len(self.projection_model) == 0: self.projection_model = self.projection_model[0]
+        )
 
-        self.prediction_model = [utils.MLP(
+        self.prediction_model = utils.MLP(
             hparams.dim,
             hparams.dim,
             hparams.mlp_hidden_dim,
             num_layers=hparams.prediction_mlp_layers,
             normalization=get_mlp_normalization(hparams, prediction=True),
             weight_standardization=hparams.use_mlp_weight_standardization,
-        ) for _ in self.model]
-        if len(self.prediction_model) == 0: self.prediction_model = self.prediction_model[0]
+        ) 
 
         #  "key" function (no grad)
-        if len(self.model) == 1:
-            self.lagging_projection_model = copy.deepcopy(self.projection_model)
-            for param in self.lagging_projection_model.parameters():
-                param.requires_grad = False
+        self.lagging_projection_model = copy.deepcopy(self.projection_model)
+        for param in self.lagging_projection_model.parameters():
+            param.requires_grad = False
 
         # this classifier is used to compute representation quality each epoch
         self.sklearn_classifier = LogisticRegression(max_iter=100, solver="liblinear")
 
         # create the queue
-        if len(self.model) > 1:
-            self.register_buffer("queue1", torch.randn(hparams.dim, hparams.K))
-            self.queue1 = torch.nn.functional.normalize(self.queue1, dim=0)
-            self.register_buffer("queue2", torch.randn(hparams.dim, hparams.K))
-            self.queue2 = torch.nn.functional.normalize(self.queue2, dim=0)
+        self.register_buffer("queue", torch.randn(hparams.dim, hparams.K))
+        self.queue = torch.nn.functional.normalize(self.queue, dim=0)
 
-            self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-        elif len(self.model == 1):
-            self.register_buffer("queue", torch.randn(hparams.dim, hparams.K))
-            self.queue = torch.nn.functional.normalize(self.queue, dim=0)
-
-            self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-
-        if len(self.model) == 1: self.model = self.model[0]
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
     def _get_embeddings(self, x):
         """
@@ -226,46 +212,7 @@ class MoCoMethod(pl.LightningModule):
                 k = utils.BatchShuffleDDP.unshuffle(k, idx_unshuffle)
 
         return emb_q, q, k
-
-    def _get_BoTRes_embeddings(self, x):
-        """
-        Input:
-            im_q: a batch of query images
-            im_k: a batch of key images
-        Output:
-            logits, targets
-        """
-        bsz, nd, nc, nh, nw = x.shape
-        assert nd == 2, "second dimension should be the split image -- dims should be N2CHW"
-        im_q = x[:, 0].contiguous()
-        im_k = x[:, 1].contiguous()
-
-        assert len(self.model) == 2, f"we should have two models but we have {len(self.model)}"
-        assert len(self.projection_model) == 2 and len(self.prediction_model) == 2,\
-        f"two projection and prediction models needed but only got {len(self.projection_model), len(self.prediction_model)} respectively"
-
-        model_q, model_k = self.model[0], self.model[1]
-        projection_q, projection_k = self.projection_model[0], self.projection_model[1]
-        prediction_q, prediction_k = self.prediction_model[0], self.prediction_model[1]
-        # compute query features
-        emb_q = self.model_q(im_q)
-        q_projection = self.projection_model(emb_q)
-        q = self.prediction_model(q_projection)  # queries: NxC
-        q = torch.nn.functional.normalize(q, dim=1)
-
-        # compute key features
-        with torch.no_grad():  # no gradient to keys
-            if self.hparams.shuffle_batch_norm:
-                im_k, idx_unshuffle = utils.BatchShuffleDDP.shuffle(im_k)
-
-            k = self.lagging_projection_model(self.lagging_model(im_k))  # keys: NxC
-            k = torch.nn.functional.normalize(k, dim=1)
-
-            if self.hparams.shuffle_batch_norm:
-                k = utils.BatchShuffleDDP.unshuffle(k, idx_unshuffle)
-
-        return emb_q, q, k
-
+        
     def _get_contrastive_predictions(self, q, k):
         if self.hparams.use_negative_examples_from_batch:
             logits = torch.mm(q, k.T)
@@ -334,49 +281,6 @@ class MoCoMethod(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx, optimizer_idx=None):
-        if self.hparams.encoder_arch == "BoTRes":
-            self.BoTRes_training_step(batch, batch_idx, optimizer_idx)
-
-        x, class_labels = batch  # batch is a tuple, we just want the image
-
-        emb_q, q, k = self._get_embeddings(x)
-        logits, labels = self._get_contrastive_predictions(q, k)
-        pos_ip, neg_ip = self._get_pos_neg_ip(emb_q, k)
-
-        contrastive_loss = self._get_contrastive_loss(logits, labels)
-
-        if self.hparams.use_both_augmentations_as_queries:
-            x_flip = torch.flip(x, dims=[1])
-            emb_q2, q2, k2 = self._get_embeddings(x_flip)
-            logits2, labels2 = self._get_contrastive_predictions(q2, k2)
-
-            pos_ip2, neg_ip2 = self._get_pos_neg_ip(emb_q2, k2)
-            pos_ip = (pos_ip + pos_ip2) / 2
-            neg_ip = (neg_ippos_ip + neg_ip2) / 2
-            contrastive_loss += self._get_contrastive_loss(logits2, labels2)
-
-        contrastive_loss = contrastive_loss.mean() * self.hparams.loss_constant_factor
-
-        log_data = {"step_train_loss": contrastive_loss, "step_pos_cos": pos_ip, "step_neg_cos": neg_ip}
-
-        with torch.no_grad():
-            self._momentum_update_key_encoder()
-
-        some_negative_examples = (
-                self.hparams.use_negative_examples_from_batch or self.hparams.use_negative_examples_from_queue
-        )
-        if some_negative_examples:
-            acc1, acc5 = utils.calculate_accuracy(logits, labels, topk=(1, 5))
-            log_data.update({"step_train_acc1": acc1, "step_train_acc5": acc5})
-
-        # dequeue and enqueue
-        if self.hparams.use_negative_examples_from_queue:
-            self._dequeue_and_enqueue(k)
-
-        self.log_dict(log_data)
-        return {"loss": contrastive_loss}
-
-    def BoTRes_training_step(self, batch, batch_idx, optimizer_idx=None):
         x, class_labels = batch  # batch is a tuple, we just want the image
 
         emb_q, q, k = self._get_embeddings(x)
