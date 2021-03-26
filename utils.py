@@ -314,7 +314,7 @@ class MLP(torch.nn.Module):
         return self.net(x)
 
 
-def get_encoder(name: str, **kwargs) -> torch.nn.Module:
+def get_encoder(name: str, device="cuda", **kwargs):
     """
     Gets just the encoder portion of a torchvision model (replaces final layer with identity)
     :param name: (str) name of the model
@@ -331,20 +331,28 @@ def get_encoder(name: str, **kwargs) -> torch.nn.Module:
         model_creator = botnet.__dict__.get(name)
     elif name in torchvision.models.__dict__:
         model_creator = torchvision.models.__dict__.get(name)
+    elif name == "BoTRes":
+        model_creator = [botnet.__dict__.get("BoTNet"), ws_resnet.__dict__.get("ws_resnet50")]
     else:
         raise AttributeError(f"Unknown architecture {name}")
 
     assert model_creator is not None, f"no torchvision model named {name}"
-    model = model_creator(**kwargs)
-    if hasattr(model, "fc"):
-        model.fc = torch.nn.Identity()
-    elif hasattr(model, "classifier"):
-        model.classifier = torch.nn.Identity()
-    elif isinstance(model, botnet.BoTNet):
-        pass
-    else:
-        raise NotImplementedError(f"Unknown class {model.__class__}")
+    if not isinstance(model_creator, list) : 
+        model_creator = [model_creator]
+    model = []
+    for i in range(len(model_creator)):
+        assert model_creator[i] is not None
+        model.append(model_creator[i](**kwargs).to(device))
+        if hasattr(model[i], "fc"):
+            model[i].fc = torch.nn.Identity()
+        elif hasattr(model, "classifier"):
+            model[i].classifier = torch.nn.Identity()
+        elif isinstance(model[i], botnet.BoTNet):
+            pass
+        else:
+            raise NotImplementedError(f"Unknown class {model[i].__class__}")
 
+    if len(model) == 1 : model = model[0]
     return model
 
 
