@@ -47,7 +47,7 @@ def main():
         use_both_augmentations_as_queries=True,
         prediction_mlp_layers=0
     )
-    BoTRes50 = MoCoMethodParams(
+    BoTRes50_eqco = MoCoMethodParams(
         use_eqco_margin=True, 
         eqco_alpha=65536, 
         K=0,
@@ -58,11 +58,28 @@ def main():
         embedding_dim=2048,
         fmap_size=24,
         dim=256,
-        batch_size=16,
+        batch_size=64,
         use_both_augmentations_as_queries=True,
         prediction_mlp_layers=0
     )
-    base_config = BoTRes50
+    BoTRes50_byol = MoCoMethodParams(
+        max_epochs=200,
+        encoder_arch="BoTRes",
+        embedding_dim=2048,
+        fmap_size=24,
+        dim=256,
+        batch_size=64,
+        prediction_mlp_layers = 2,
+        mlp_normalization = "bn",
+        loss_type = "ip",
+        use_negative_examples_from_queue = False,
+        use_both_augmentations_as_queries = True,
+        use_momentum_schedule = True,
+        optimizer_name = "lars",
+        exclude_matching_parameters_from_lars = [".bias", ".bn"],
+        loss_constant_factor = 2
+    )
+    base_config = BoTRes50_byol
     configs = {
         "base": base_config,
         # "pred_only": evolve(base_config, mlp_normalization=None, prediction_mlp_normalization="bn"),

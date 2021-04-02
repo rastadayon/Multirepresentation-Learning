@@ -380,7 +380,7 @@ class MoCoMethod(pl.LightningModule):
             contrastive_loss += self._get_contrastive_loss(logits, labels)
             contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k, q_projection.detach()))
         else: #EqCo
-            logits, labels = self._get_contrastive_predictions(q, k_projection.detach())
+            logits, labels = self._get_contrastive_predictions(q, k.detach())
             contrastive_loss += self._get_contrastive_loss(logits, labels)
             contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k, q.detach()))
         # pos_ip, neg_ip = self._get_pos_neg_ip(emb_q, k)
