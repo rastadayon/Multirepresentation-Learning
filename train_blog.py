@@ -43,7 +43,7 @@ def main():
         embedding_dim=2048,
         fmap_size=24,
         dim=256,
-        batch_size=128,
+        batch_size=64,
         use_both_augmentations_as_queries=True,
         prediction_mlp_layers=0
     )
@@ -73,7 +73,7 @@ def main():
         mlp_normalization = "bn",
         loss_type = "ip",
         use_negative_examples_from_queue = False,
-        use_both_augmentations_as_queries = True,
+        # use_both_augmentations_as_queries = True,
         use_momentum_schedule = True,
         optimizer_name = "lars",
         exclude_matching_parameters_from_lars = [".bias", ".bn"],

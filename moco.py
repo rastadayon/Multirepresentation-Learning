@@ -400,6 +400,7 @@ class MoCoMethod(pl.LightningModule):
             # neg_ip = (neg_ip + neg_ip2) / 2
 
         contrastive_loss = contrastive_loss.mean() * self.hparams.loss_constant_factor
+        assert torch.isnan(contrastive_loss).sum().item() == 0, 'loss is nan'
 
         # log_data = {"step_train_loss": contrastive_loss, "step_pos_cos": pos_ip, "step_neg_cos": neg_ip}
         log_data = {"step_train_loss": contrastive_loss}
@@ -433,6 +434,7 @@ class MoCoMethod(pl.LightningModule):
             return {"emb": emb, "labels": class_labels}
 
     def validation_epoch_end(self, outputs):
+        model_list = [self.model] if self.one_architecture else self.model
         labels = torch.cat([x["labels"] for x in outputs]).cpu().detach().numpy()
         if not self.one_architecture:
             embedding1 = torch.cat([x["emb1"] for x in outputs]).cpu().detach().numpy()
@@ -455,7 +457,7 @@ class MoCoMethod(pl.LightningModule):
         }
         train_report, valid_report = "", ""
         for i in range(len(train_accuracy)):
-            model = self.model[i].__class__.__name__ if i in range(len(self.model)) else "cat"
+            model = model_list[i].__class__.__name__ if i in range(len(model_list)) else "cat"
             log_data["train_class_acc_for_" + model] = train_accuracy[i]
             log_data["valid_class_acc_for_" + model] = valid_accuracy[i]
             train_report += model + ": " + "{:.1f}".format(train_accuracy[i]) + "\t"
