@@ -18,7 +18,6 @@ import utils
 from batchrenorm import BatchRenorm1d
 from lars import LARS
 
-
 @attr.s(auto_attribs=True)
 class MoCoMethodParams:
     # encoder model selection
@@ -106,7 +105,7 @@ class MoCoMethod(pl.LightningModule):
     embedding_dim: Optional[int]
 
     def __init__(
-        self, hparams: Union[MoCoMethodParams, dict, None] = None,  **kwargs,
+        self, hparams: Union[MoCoMethodParams, dict, None] = None, device="cuda", **kwargs,
     ):
         super().__init__()
 
@@ -129,6 +128,8 @@ class MoCoMethod(pl.LightningModule):
                 "Configuration suspicious: gather_keys_for_queue without shuffle_batch_norm or weight standardization"
             )
 
+        self.one_architecture = True if hparams.encoder_arch != "BoTRes" else False
+
         some_negative_examples = hparams.use_negative_examples_from_batch or hparams.use_negative_examples_from_queue
         if hparams.loss_type == "ce" and not some_negative_examples:
             warnings.warn("Configuration suspicious: cross entropy loss without negative examples")
@@ -145,37 +146,43 @@ class MoCoMethod(pl.LightningModule):
         self.dataset = utils.get_moco_dataset(hparams.dataset_name, transforms)
 
         # "key" function (no grad)
-        self.lagging_model = copy.deepcopy(self.model)
-        for param in self.lagging_model.parameters():
-            param.requires_grad = False
+        if not isinstance(self.model, list):
+            self.lagging_model = copy.deepcopy(self.model)
+            for param in self.lagging_model.parameters():
+                param.requires_grad = False
 
-        self.projection_model = utils.MLP(
+        models = self.model if isinstance(self.model, list) else [self.model]
+        self.projection_model = [utils.MLP(
             hparams.embedding_dim,
             hparams.dim,
             hparams.mlp_hidden_dim,
             num_layers=hparams.projection_mlp_layers,
             normalization=get_mlp_normalization(hparams),
             weight_standardization=hparams.use_mlp_weight_standardization,
-        )
+        ).to(device) for _ in range(len(models))]
+        if len(self.projection_model) == 1: self.projection_model = self.projection_model[0]
 
-        self.prediction_model = utils.MLP(
+        self.prediction_model = [utils.MLP(
             hparams.dim,
             hparams.dim,
             hparams.mlp_hidden_dim,
             num_layers=hparams.prediction_mlp_layers,
             normalization=get_mlp_normalization(hparams, prediction=True),
             weight_standardization=hparams.use_mlp_weight_standardization,
-        ) 
+        ).to(device) for _ in range(len(models))]
+        if len(self.prediction_model) == 1: self.prediction_model = self.prediction_model[0]
 
         #  "key" function (no grad)
-        self.lagging_projection_model = copy.deepcopy(self.projection_model)
-        for param in self.lagging_projection_model.parameters():
-            param.requires_grad = False
+        if self.one_architecture:
+            self.lagging_projection_model = copy.deepcopy(self.projection_model)
+            for param in self.lagging_projection_model.parameters():
+                param.requires_grad = False
 
         # this classifier is used to compute representation quality each epoch
         self.sklearn_classifier = LogisticRegression(max_iter=100, solver="liblinear")
 
         # create the queue
+        dim = hparams.dim if self.one_architecture else 2 * hparams.dim
         self.register_buffer("queue", torch.randn(hparams.dim, hparams.K))
         self.queue = torch.nn.functional.normalize(self.queue, dim=0)
 
@@ -212,6 +219,46 @@ class MoCoMethod(pl.LightningModule):
                 k = utils.BatchShuffleDDP.unshuffle(k, idx_unshuffle)
 
         return emb_q, q, k
+
+    def _get_embeddings_for_two_archs(self, x):
+        """
+        Input:
+            im_q: a batch of query images
+            im_k: a batch of key images
+        Output:
+            logits, targets
+        """
+        bsz, nd, nc, nh, nw = x.shape
+        assert nd == 2, "second dimension should be the split image -- dims should be N2CHW"
+        im_q = x[:, 0].contiguous()
+        im_k = x[:, 1].contiguous()
+
+        model1, model2 = (self.model, self.lagging_model) if self.one_architecture else (self.model[0], self.model[1])
+        proj_model1, proj_model2 = (self.projection_model, self.lagging_projection_model) if self.one_architecture else (self.projection_model[0], self.projection_model[1])
+        pred_model1, pred_model2 = (self.prediction_model, None) if self.one_architecture else (self.prediction_model[0], self.prediction_model[1])
+
+        # compute query features
+        q_projection = proj_model1(model1(im_q))
+        q = pred_model1(q_projection)  # queries: NxC
+        q = torch.nn.functional.normalize(q, dim=1)
+
+        # compute key features
+        if self.hparams.shuffle_batch_norm:
+            im_k, idx_unshuffle = utils.BatchShuffleDDP.shuffle(im_k)
+        
+        k_projection = proj_model2(model2(im_k))  # keys: NxC
+        if pred_model2 is not None: 
+            k = pred_model2(k_projection)
+        else:
+            k = k_projection
+        k = torch.nn.functional.normalize(k, dim=1)
+
+        if self.hparams.shuffle_batch_norm:
+            k = utils.BatchShuffleDDP.unshuffle(k, idx_unshuffle)
+
+        q_projection = torch.nn.functional.normalize(q_projection, dim=1)
+        k_projection = torch.nn.functional.normalize(k_projection, dim=1)
+        return q_projection, k_projection, q, k
         
     def _get_contrastive_predictions(self, q, k):
         if self.hparams.use_negative_examples_from_batch:
@@ -278,9 +325,12 @@ class MoCoMethod(pl.LightningModule):
         raise NotImplementedError(f"Loss function {self.hparams.loss_type} not implemented")
 
     def forward(self, x):
+        print("forward is being called \\_(o.o)_/")
         return self.model(x)
 
     def training_step(self, batch, batch_idx, optimizer_idx=None):
+        if not self.one_architecture:
+            return self.training_step_for_two_archs(batch, batch_idx, optimizer_idx)
         x, class_labels = batch  # batch is a tuple, we just want the image
 
         emb_q, q, k = self._get_embeddings(x)
@@ -296,7 +346,7 @@ class MoCoMethod(pl.LightningModule):
 
             pos_ip2, neg_ip2 = self._get_pos_neg_ip(emb_q2, k2)
             pos_ip = (pos_ip + pos_ip2) / 2
-            neg_ip = (neg_ippos_ip + neg_ip2) / 2
+            neg_ip = (neg_ip + neg_ip2) / 2
             contrastive_loss += self._get_contrastive_loss(logits2, labels2)
 
         contrastive_loss = contrastive_loss.mean() * self.hparams.loss_constant_factor
@@ -320,30 +370,101 @@ class MoCoMethod(pl.LightningModule):
         self.log_dict(log_data)
         return {"loss": contrastive_loss}
 
+    def training_step_for_two_archs(self, batch, batch_idx, optimizer_idx=None):
+        x, class_labels = batch  # batch is a tuple, we just want the image
+
+        q_projection, k_projection, q, k = self._get_embeddings_for_two_archs(x)
+        contrastive_loss = 0
+        if self.hparams.prediction_mlp_layers != 0: #BYOL
+            logits, labels = self._get_contrastive_predictions(q, k_projection.detach())
+            contrastive_loss += self._get_contrastive_loss(logits, labels)
+            contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k, q_projection.detach()))
+        else: #EqCo
+            logits, labels = self._get_contrastive_predictions(q, k_projection.detach())
+            contrastive_loss += self._get_contrastive_loss(logits, labels)
+            contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k, q.detach()))
+        # pos_ip, neg_ip = self._get_pos_neg_ip(emb_q, k)
+
+        if self.hparams.use_both_augmentations_as_queries:
+            x_flip = torch.flip(x, dims=[1])
+            q_projection2, k_projection2, q2, k2 = self._get_embeddings_for_two_archs(x_flip)
+            if self.hparams.prediction_mlp_layers != 0: #BYOL
+                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(q2, k_projection2.detach()))
+                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k2, q_projection2.detach()))
+            else: #EqCo
+                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(q2, k2.detach()))
+                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k2, q2.detach()))
+
+            # pos_ip2, neg_ip2 = self._get_pos_neg_ip(emb_q2, k2)
+            # pos_ip = (pos_ip + pos_ip2) / 2
+            # neg_ip = (neg_ip + neg_ip2) / 2
+
+        contrastive_loss = contrastive_loss.mean() * self.hparams.loss_constant_factor
+
+        # log_data = {"step_train_loss": contrastive_loss, "step_pos_cos": pos_ip, "step_neg_cos": neg_ip}
+        log_data = {"step_train_loss": contrastive_loss}
+
+        some_negative_examples = (
+            self.hparams.use_negative_examples_from_batch or self.hparams.use_negative_examples_from_queue
+        )
+        if some_negative_examples:
+            acc1, acc5 = utils.calculate_accuracy(logits, labels, topk=(1, 5)) #not sure if this is right 
+            log_data.update({"step_train_acc1": acc1, "step_train_acc5": acc5})
+
+        # dequeue and enqueue
+        if self.hparams.use_negative_examples_from_queue:
+            self._dequeue_and_enqueue(k)
+
+        self.log_dict(log_data)
+        return {"loss": contrastive_loss}
 
     def validation_step(self, batch, batch_idx):
         x, class_labels = batch
-        with torch.no_grad():
-            emb = self.model(x)
+        if not self.one_architecture:
+            assert len(self.model) == 2, f"expected two architectures got {len(self.model)}"
+            with torch.no_grad():
+                emb1 = self.model[0](x)
+                emb2 = self.model[1](x)
+            return {"emb1": emb1, "emb2": emb2, "emb_cat": torch.cat([emb1, emb2], dim=1), "labels": class_labels}
+        else:
+            with torch.no_grad():
+                emb = self.model(x)
 
-        return {"emb": emb, "labels": class_labels}
+            return {"emb": emb, "labels": class_labels}
 
     def validation_epoch_end(self, outputs):
-        embeddings = torch.cat([x["emb"] for x in outputs]).cpu().detach().numpy()
         labels = torch.cat([x["labels"] for x in outputs]).cpu().detach().numpy()
-        num_split_linear = embeddings.shape[0] // 2
-        self.sklearn_classifier.fit(embeddings[:num_split_linear], labels[:num_split_linear])
-        train_accuracy = self.sklearn_classifier.score(embeddings[:num_split_linear], labels[:num_split_linear]) * 100
-        valid_accuracy = self.sklearn_classifier.score(embeddings[num_split_linear:], labels[num_split_linear:]) * 100
+        if not self.one_architecture:
+            embedding1 = torch.cat([x["emb1"] for x in outputs]).cpu().detach().numpy()
+            embedding2 = torch.cat([x["emb2"] for x in outputs]).cpu().detach().numpy()
+            cat_embedding = torch.cat([x["emb_cat"] for x in outputs]).cpu().detach().numpy()
+            embeddings = [embedding1, embedding2, cat_embedding]
+        else:
+            embeddings = [torch.cat([x["emb"] for x in outputs]).cpu().detach().numpy()]
+        num_split_linear = embeddings[0].shape[0] // 2
+
+        train_accuracy = []
+        valid_accuracy = []
+        for embedding in embeddings:
+            self.sklearn_classifier.fit(embedding[:num_split_linear], labels[:num_split_linear])
+            train_accuracy.append(self.sklearn_classifier.score(embedding[:num_split_linear], labels[:num_split_linear]) * 100)
+            valid_accuracy.append(self.sklearn_classifier.score(embedding[num_split_linear:], labels[num_split_linear:]) * 100)
 
         log_data = {
-            "epoch": self.current_epoch,
-            "train_class_acc": train_accuracy,
-            "valid_class_acc": valid_accuracy,
-            "T": self._get_temp(),
-            "m": self._get_m(),
+            "epoch": self.current_epoch
         }
-        print(f"Epoch {self.current_epoch} accuracy: train: {train_accuracy:.1f}%, validation: {valid_accuracy:.1f}%")
+        train_report, valid_report = "", ""
+        for i in range(len(train_accuracy)):
+            model = self.model[i].__class__.__name__ if i in range(len(self.model)) else "cat"
+            log_data["train_class_acc_for_" + model] = train_accuracy[i]
+            log_data["valid_class_acc_for_" + model] = valid_accuracy[i]
+            train_report += model + ": " + "{:.1f}".format(train_accuracy[i]) + "\t"
+            valid_report += model + ": " + "{:.1f}".format(valid_accuracy[i]) + "\t"
+
+        log_data["T"] = self._get_temp()
+        log_data["m"] = self._get_m()
+
+        print(f"Epoch {self.current_epoch} accuracy: train: {train_report}, validation: {valid_report}")
         self.log_dict(log_data)
 
     def configure_optimizers(self):
@@ -352,34 +473,42 @@ class MoCoMethod(pl.LightningModule):
         regular_parameter_names = []
         excluded_parameters = []
         excluded_parameter_names = []
-        for name, parameter in self.named_parameters():
-            if parameter.requires_grad is False:
-                continue
-            if any(x in name for x in self.hparams.exclude_matching_parameters_from_lars):
-                excluded_parameters.append(parameter)
-                excluded_parameter_names.append(name)
+        models = [self.model] if self.one_architecture else self.model
+        optimizers, schedulers = [], []
+        for model in models:
+            for name, parameter in model.named_parameters():
+                if parameter.requires_grad is False:
+                    continue
+                if any(x in name for x in self.hparams.exclude_matching_parameters_from_lars):
+                    excluded_parameters.append(parameter)
+                    excluded_parameter_names.append(name)
+                else:
+                    regular_parameters.append(parameter)
+                    regular_parameter_names.append(name)
+
+            param_groups = [
+                {"params": regular_parameters, "names": regular_parameter_names, "use_lars": True},
+                {"params": excluded_parameters, "names": excluded_parameter_names, "use_lars": False, "weight_decay": 0,},
+            ]
+            if self.hparams.optimizer_name == "sgd":
+                optimizer = torch.optim.SGD
+            elif self.hparams.optimizer_name == "lars":
+                optimizer = LARS
             else:
-                regular_parameters.append(parameter)
-                regular_parameter_names.append(name)
+                raise NotImplementedError(f"No such optimizer {self.hparams.optimizer_name}")
 
-        param_groups = [
-            {"params": regular_parameters, "names": regular_parameter_names, "use_lars": True},
-            {"params": excluded_parameters, "names": excluded_parameter_names, "use_lars": False, "weight_decay": 0,},
-        ]
-        if self.hparams.optimizer_name == "sgd":
-            optimizer = torch.optim.SGD
-        elif self.hparams.optimizer_name == "lars":
-            optimizer = LARS
-        else:
-            raise NotImplementedError(f"No such optimizer {self.hparams.optimizer_name}")
+            encoding_optimizer = optimizer(
+                param_groups, lr=self.hparams.lr, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay,
+            )
+            optimizers.append(encoding_optimizer)
+            lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                encoding_optimizer, self.hparams.max_epochs, eta_min=0
+            )
+            schedulers.append(lr_scheduler)
 
-        encoding_optimizer = optimizer(
-            param_groups, lr=self.hparams.lr, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay,
-        )
-        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            encoding_optimizer, self.hparams.max_epochs, eta_min=0
-        )
-        return [encoding_optimizer], [self.lr_scheduler]
+        self.lr_scheduler = schedulers
+        
+        return optimizers, schedulers
 
     def _get_m(self):
         if self.hparams.use_momentum_schedule is False:

@@ -27,8 +27,10 @@ def main():
         use_negative_examples_from_batch=True,
         use_negative_examples_from_queue=False,
         max_epochs=200,
-        encoder_arch="ws_resnet50",
-        embedding_dim=2048
+        encoder_arch="resnet50",
+        embedding_dim=2048,
+        use_both_augmentations_as_queries=True,
+        prediction_mlp_layers=0
     )
     two_botnets = MoCoMethodParams(
         use_eqco_margin=True, 
@@ -41,7 +43,9 @@ def main():
         embedding_dim=2048,
         fmap_size=24,
         dim=256,
-        batch_size=128
+        batch_size=128,
+        use_both_augmentations_as_queries=True,
+        prediction_mlp_layers=0
     )
     BoTRes50 = MoCoMethodParams(
         use_eqco_margin=True, 
@@ -54,7 +58,9 @@ def main():
         embedding_dim=2048,
         fmap_size=24,
         dim=256,
-        batch_size=128
+        batch_size=16,
+        use_both_augmentations_as_queries=True,
+        prediction_mlp_layers=0
     )
     base_config = BoTRes50
     configs = {

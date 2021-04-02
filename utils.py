@@ -314,7 +314,7 @@ class MLP(torch.nn.Module):
         return self.net(x)
 
 
-def get_encoder(name: str, device="cuda", **kwargs):
+def get_encoder(name: str, device="cuda", fmap_size=None, dim=None, **kwargs):
     """
     Gets just the encoder portion of a torchvision model (replaces final layer with identity)
     :param name: (str) name of the model
@@ -332,7 +332,7 @@ def get_encoder(name: str, device="cuda", **kwargs):
     elif name in torchvision.models.__dict__:
         model_creator = torchvision.models.__dict__.get(name)
     elif name == "BoTRes":
-        model_creator = [botnet.__dict__.get("BoTNet"), ws_resnet.__dict__.get("ws_resnet50")]
+        model_creator = [botnet.__dict__.get("BoTNet"), torchvision.models.__dict__.get("resnet50")]
     else:
         raise AttributeError(f"Unknown architecture {name}")
 
@@ -340,17 +340,18 @@ def get_encoder(name: str, device="cuda", **kwargs):
     if not isinstance(model_creator, list) : 
         model_creator = [model_creator]
     model = []
-    for i in range(len(model_creator)):
-        assert model_creator[i] is not None
-        model.append(model_creator[i](**kwargs).to(device))
-        if hasattr(model[i], "fc"):
-            model[i].fc = torch.nn.Identity()
+    for mc in model_creator:
+        assert mc is not None
+        new_model = mc(**kwargs).to(device) if mc.__name__ is not "BoTNet" else mc(dim, fmap_size, **kwargs).to(device)
+        model.append(new_model)
+        if hasattr(new_model, "fc"):
+            new_model.fc = torch.nn.Identity()
         elif hasattr(model, "classifier"):
-            model[i].classifier = torch.nn.Identity()
-        elif isinstance(model[i], botnet.BoTNet):
+            new_model.classifier = torch.nn.Identity()
+        elif isinstance(new_model, botnet.BoTNet):
             pass
         else:
-            raise NotImplementedError(f"Unknown class {model[i].__class__}")
+            raise NotImplementedError(f"Unknown class {new_model.__class__}")
 
     if len(model) == 1 : model = model[0]
     return model
