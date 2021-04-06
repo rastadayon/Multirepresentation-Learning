@@ -75,7 +75,7 @@ def main():
         use_negative_examples_from_queue = False,
         # use_both_augmentations_as_queries = True,
         use_momentum_schedule = True,
-        optimizer_name = "lars",
+        optimizer_name = ["sgd", "lars"],
         exclude_matching_parameters_from_lars = [".bias", ".bn"],
         loss_constant_factor = 2
     )

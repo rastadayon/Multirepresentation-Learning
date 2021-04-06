@@ -56,7 +56,7 @@ class MoCoMethodParams:
     loss_type: str = "ce"
     use_negative_examples_from_queue: bool = True
     use_both_augmentations_as_queries: bool = False
-    optimizer_name: str = "sgd"
+    optimizer_name: list = ["sgd"]
     exclude_matching_parameters_from_lars: List[str] = []  # set to [".bias", ".bn"] to match paper
     loss_constant_factor: float = 1
 
@@ -231,39 +231,51 @@ class MoCoMethod(pl.LightningModule):
         bsz, nd, nc, nh, nw = x.shape
         assert nd == 2, "second dimension should be the split image -- dims should be N2CHW"
         im_q = x[:, 0].contiguous()
+        assert torch.isnan(im_q).sum().item() == 0, 'im_q is nan'
         im_k = x[:, 1].contiguous()
+        assert torch.isnan(im_q).sum().item() == 0, 'im_q is nan'
 
-        model1, model2 = (self.model, self.lagging_model) if self.one_architecture else (self.model[0], self.model[1])
-        proj_model1, proj_model2 = (self.projection_model, self.lagging_projection_model) if self.one_architecture else (self.projection_model[0], self.projection_model[1])
-        pred_model1, pred_model2 = (self.prediction_model, None) if self.one_architecture else (self.prediction_model[0], self.prediction_model[1])
+        model1, model2 = self.model[0], self.model[1]
+        proj_model1, proj_model2 = self.projection_model[0], self.projection_model[1]
+        pred_model1, pred_model2 = self.prediction_model[0], self.prediction_model[1]
 
         # compute query features
-        q_projection = proj_model1(model1(im_q))
+        temp = model1(im_q)
+        assert torch.isnan(temp).sum().item() == 0, 'temp is nan'
+        q_projection = proj_model1(temp)
+        assert torch.isnan(q_projection).sum().item() == 0, 'q_projection is nan'
         q = pred_model1(q_projection)  # queries: NxC
+        assert torch.isnan(q).sum().item() == 0, 'q is nan'
         q = torch.nn.functional.normalize(q, dim=1)
+        assert torch.isnan(q).sum().item() == 0, 'q is nan'
 
         # compute key features
         if self.hparams.shuffle_batch_norm:
             im_k, idx_unshuffle = utils.BatchShuffleDDP.shuffle(im_k)
         
         k_projection = proj_model2(model2(im_k))  # keys: NxC
-        if pred_model2 is not None: 
-            k = pred_model2(k_projection)
-        else:
-            k = k_projection
+        k = pred_model2(k_projection)
+        assert torch.isnan(k).sum().item() == 0, 'k is nan'
         k = torch.nn.functional.normalize(k, dim=1)
+        assert torch.isnan(k).sum().item() == 0, 'k is nan'
 
         if self.hparams.shuffle_batch_norm:
             k = utils.BatchShuffleDDP.unshuffle(k, idx_unshuffle)
 
-        q_projection = torch.nn.functional.normalize(q_projection, dim=1)
-        k_projection = torch.nn.functional.normalize(k_projection, dim=1)
+        assert torch.isnan(q_projection).sum().item() == 0, 'q_projection is nan'
+        q_projection = torch.nn.functional.normalize(q_projection.clone().detach(), dim=1)
+        assert torch.isnan(q_projection).sum().item() == 0, 'q_projection is nan'
+        assert torch.isnan(k_projection).sum().item() == 0, 'k_projection is nan'
+        k_projection = torch.nn.functional.normalize(k_projection.clone().detach(), dim=1)
+        assert torch.isnan(k_projection).sum().item() == 0, 'k_projection is nan'
         return q_projection, k_projection, q, k
         
     def _get_contrastive_predictions(self, q, k):
         if self.hparams.use_negative_examples_from_batch:
             logits = torch.mm(q, k.T)
+            assert torch.isnan(logits).sum().item() == 0, 'logits are nan'
             labels = torch.arange(0, q.shape[0], dtype=torch.long).to(logits.device)
+            assert torch.isnan(labels).sum().item() == 0, 'labels are nan'
             return logits, labels
 
         # compute logits
@@ -376,9 +388,9 @@ class MoCoMethod(pl.LightningModule):
         q_projection, k_projection, q, k = self._get_embeddings_for_two_archs(x)
         contrastive_loss = 0
         if self.hparams.prediction_mlp_layers != 0: #BYOL
-            logits, labels = self._get_contrastive_predictions(q, k_projection.detach())
+            logits, labels = self._get_contrastive_predictions(q, k_projection)
             contrastive_loss += self._get_contrastive_loss(logits, labels)
-            contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k, q_projection.detach()))
+            contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k, q_projection))
         else: #EqCo
             logits, labels = self._get_contrastive_predictions(q, k.detach())
             contrastive_loss += self._get_contrastive_loss(logits, labels)
@@ -389,8 +401,8 @@ class MoCoMethod(pl.LightningModule):
             x_flip = torch.flip(x, dims=[1])
             q_projection2, k_projection2, q2, k2 = self._get_embeddings_for_two_archs(x_flip)
             if self.hparams.prediction_mlp_layers != 0: #BYOL
-                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(q2, k_projection2.detach()))
-                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k2, q_projection2.detach()))
+                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(q2, k_projection2))
+                contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k2, q_projection2))
             else: #EqCo
                 contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(q2, k2.detach()))
                 contrastive_loss += self._get_contrastive_loss(*self._get_contrastive_predictions(k2, q2.detach()))
@@ -471,17 +483,17 @@ class MoCoMethod(pl.LightningModule):
 
     def configure_optimizers(self):
         # exclude bias and batch norm from LARS and weight decay
-        regular_parameters = []
-        regular_parameter_names = []
-        excluded_parameters = []
-        excluded_parameter_names = []
         models = [self.model] if self.one_architecture else self.model
         optimizers, schedulers = [], []
-        for model in models:
+        for i, model in enumerate(models):
+            regular_parameters = []
+            regular_parameter_names = []
+            excluded_parameters = []
+            excluded_parameter_names = []
             for name, parameter in model.named_parameters():
                 if parameter.requires_grad is False:
                     continue
-                if any(x in name for x in self.hparams.exclude_matching_parameters_from_lars):
+                if (self.hparams.optimizer_name[i] == "lars") and (any(x in name for x in self.hparams.exclude_matching_parameters_from_lars)):
                     excluded_parameters.append(parameter)
                     excluded_parameter_names.append(name)
                 else:
@@ -492,12 +504,12 @@ class MoCoMethod(pl.LightningModule):
                 {"params": regular_parameters, "names": regular_parameter_names, "use_lars": True},
                 {"params": excluded_parameters, "names": excluded_parameter_names, "use_lars": False, "weight_decay": 0,},
             ]
-            if self.hparams.optimizer_name == "sgd":
+            if self.hparams.optimizer_name[i] == "sgd":
                 optimizer = torch.optim.SGD
-            elif self.hparams.optimizer_name == "lars":
+            elif self.hparams.optimizer_name[i] == "lars":
                 optimizer = LARS
             else:
-                raise NotImplementedError(f"No such optimizer {self.hparams.optimizer_name}")
+                raise NotImplementedError(f"No such optimizer {self.hparams.optimizer_name[i]}")
 
             encoding_optimizer = optimizer(
                 param_groups, lr=self.hparams.lr, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay,
