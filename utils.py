@@ -330,7 +330,7 @@ def get_encoder(name: str, device="cuda", fmap_size=None, dim=None, **kwargs):
     elif name in botnet.__dict__:
         model_creator = botnet.__dict__.get(name)
     elif name in torchvision.models.__dict__:
-        model_creator = torchvision.models.__dict__.get(name, groups=64)
+        model_creator = torchvision.models.__dict__.get(name)
     elif name == "BoTRes":
         model_creator = [botnet.__dict__.get("BoTNet"), torchvision.models.__dict__.get("resnet50")]
     else:
