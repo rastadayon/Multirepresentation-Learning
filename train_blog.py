@@ -60,7 +60,8 @@ def main():
         dim=256,
         batch_size=64,
         use_both_augmentations_as_queries=True,
-        prediction_mlp_layers=0
+        prediction_mlp_layers=0,
+        optimizer_name = ["sgd", "sgd"]
     )
     BoTRes50_byol = MoCoMethodParams(
         max_epochs=200,
@@ -73,7 +74,7 @@ def main():
         mlp_normalization = "bn",
         loss_type = "ip",
         use_negative_examples_from_queue = False,
-        # use_both_augmentations_as_queries = True,
+        use_both_augmentations_as_queries = True,
         use_momentum_schedule = True,
         optimizer_name = ["sgd", "lars"],
         exclude_matching_parameters_from_lars = [".bias", ".bn"],
